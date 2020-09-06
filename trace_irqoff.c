@@ -678,30 +678,25 @@ static int __init trace_irqoff_init(void)
 		goto free_percpu;
 
 	if (!proc_create("distribute", S_IRUSR, parent_dir, &distribute_fops))
-		goto remove_trace_irqoff;
+		goto remove_proc;
 
 	if (!proc_create("trace_latency", S_IRUSR | S_IWUSR, parent_dir,
 			 &trace_latency_fops))
-		goto remove_distribute;
+		goto remove_proc;
 
 	if (!proc_create("enable", S_IRUSR | S_IWUSR, parent_dir, &enable_fops))
-		goto remove_trace_latency;
+		goto remove_proc;
 
 	if (!proc_create("sampling_period", S_IRUSR | S_IWUSR, parent_dir,
 			 &sampling_period_fops))
-		goto remove_enable;
+		goto remove_proc;
 
 	return 0;
+
+remove_proc:
+	remove_proc_subtree("trace_irqoff", NULL);
 free_percpu:
 	free_percpu(cpu_stack_trace);
-remove_enable:
-	remove_proc_entry("enable", parent_dir);
-remove_trace_latency:
-	remove_proc_entry("trace_latency", parent_dir);
-remove_distribute:
-	remove_proc_entry("distribute", parent_dir);
-remove_trace_irqoff:
-	proc_remove(parent_dir);
 
 	return -ENOMEM;
 }
