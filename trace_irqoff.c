@@ -279,13 +279,15 @@ static bool trace_irqoff_record(u64 delta, bool hardirq, bool skip)
 {
 	int index = 0;
 	u64 throttle = sampling_period << 1;
-	u64 delta_old = delta;
+	u64 delta_old;
 
 	if (delta < throttle)
 		return false;
 
+	delta -= sampling_period;
+	delta_old = delta;
 	delta >>= 1;
-	while (delta > throttle) {
+	while (delta > sampling_period) {
 		index++;
 		delta >>= 1;
 	}
@@ -320,7 +322,7 @@ static enum hrtimer_restart trace_irqoff_hrtimer_handler(struct hrtimer *hrtimer
 		delta_soft = now -
 			__this_cpu_read(cpu_stack_trace->softirq_trace.last_timestamp);
 
-		if (unlikely(delta_soft >= trace_irqoff_latency)) {
+		if (unlikely(delta_soft >= trace_irqoff_latency + sampling_period)) {
 			__this_cpu_write(cpu_stack_trace->softirq_delayed, true);
 			trace_irqoff_record(delta_soft, false, true);
 		}
@@ -458,7 +460,7 @@ static void distribute_show_one(struct seq_file *m, void *v, bool hardirq)
 
 	histogram_show(m, hardirq ? "hardirq-off:" : "softirq-off:",
 		       latency_count, MAX_LATENCY_RECORD,
-		       (sampling_period << 1) / (1000 * 1000UL));
+		       sampling_period / (1000 * 1000UL));
 }
 
 static int distribute_show(struct seq_file *m, void *v)
