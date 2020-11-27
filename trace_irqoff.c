@@ -22,6 +22,7 @@
 #include <linux/stacktrace.h>
 #include <linux/timer.h>
 #include <linux/uaccess.h>
+#include <linux/kprobes.h>
 #include <linux/version.h>
 #include <asm/irq_regs.h>
 
@@ -39,6 +40,7 @@
 
 #define MAX_LATENCY_RECORD		10
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
 #ifndef DEFINE_SHOW_ATTRIBUTE
 #define DEFINE_SHOW_ATTRIBUTE(__name)					\
 static int __name ## _open(struct inode *inode, struct file *file)	\
@@ -53,7 +55,23 @@ static const struct file_operations __name ## _fops = {			\
 	.llseek		= seq_lseek,					\
 	.release	= single_release,				\
 }
-#endif
+#endif /* DEFINE_SHOW_ATTRIBUTE */
+#define IRQ_OFF_DEFINE_SHOW_ATTRIBUTE DEFINE_SHOW_ATTRIBUTE
+
+#else /* LINUX_VERSION_CODE */
+#define IRQ_OFF_DEFINE_SHOW_ATTRIBUTE(__name)				\
+static int __name ## _open(struct inode *inode, struct file *file)	\
+{									\
+	return single_open(file, __name ## _show, inode->i_private);	\
+}									\
+									\
+static const struct proc_ops __name ## _fops = {			\
+	.proc_open	= __name ## _open,				\
+	.proc_read	= seq_read,					\
+	.proc_lseek	= seq_lseek,					\
+	.proc_release	= single_release,				\
+}
+#endif /* LINUX_VERSION_CODE */
 
 static bool trace_enable;
 
@@ -151,11 +169,51 @@ static unsigned int (*stack_trace_save_skip_hardirq)(struct pt_regs *regs,
 						     unsigned int size,
 						     unsigned int skipnr);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
 static inline void stack_trace_skip_hardirq_init(void)
 {
 	stack_trace_save_skip_hardirq =
 			(void *)kallsyms_lookup_name("stack_trace_save_regs");
 }
+#else /* LINUX_VERSION_CODE */
+
+static int noop_pre_handler(struct kprobe *p, struct pt_regs *regs){
+	return 0;
+}
+
+/**
+ * Since commit 0bd476e6c671 ("kallsyms: unexport kallsyms_lookup_name()
+ * and kallsyms_on_each_symbol()"), kallsyms_lookup_name is unexported.
+ *
+ * We can only find the kallsyms_lookup_name's addr by using kprobes, then use
+ * the unexported kallsyms_lookup_name to find symbols.
+ */
+static void stack_trace_skip_hardirq_init(void)
+{
+	int ret;
+	struct kprobe kp;
+	unsigned long (*kallsyms_lookup_name_fun)(const char *name);
+
+
+	ret = -1;
+	kp.symbol_name = "kallsyms_lookup_name";
+	kp.pre_handler = noop_pre_handler;
+	stack_trace_save_skip_hardirq = NULL;
+
+	ret = register_kprobe(&kp);
+	if (ret < 0) {
+		printk(KERN_INFO "register_kprobe failed, error:%d\n", ret);
+		return;
+	}
+
+	printk(KERN_INFO "kallsyms_lookup_name addr: %p\n", kp.addr);
+	kallsyms_lookup_name_fun = (void*)kp.addr;
+	unregister_kprobe(&kp);
+
+	stack_trace_save_skip_hardirq =
+		(void *)kallsyms_lookup_name_fun("stack_trace_save_regs");
+}
+#endif  /* LINUX_VERSION_CODE */
 
 static inline void store_stack_trace(struct pt_regs *regs,
 				     struct irqoff_trace *trace,
@@ -413,7 +471,7 @@ static int distribute_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-DEFINE_SHOW_ATTRIBUTE(distribute);
+IRQ_OFF_DEFINE_SHOW_ATTRIBUTE(distribute);
 
 static void seq_print_stack_trace(struct seq_file *m, struct irqoff_trace *trace)
 {
@@ -510,6 +568,7 @@ static int trace_latency_open(struct inode *inode, struct file *file)
 	return single_open(file, trace_latency_show, inode->i_private);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
 static const struct file_operations trace_latency_fops = {
 	.owner		= THIS_MODULE,
 	.open		= trace_latency_open,
@@ -518,6 +577,15 @@ static const struct file_operations trace_latency_fops = {
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
+#else
+static const struct proc_ops trace_latency_fops = {
+	.proc_open	= trace_latency_open,
+	.proc_read	= seq_read,
+	.proc_write	= trace_latency_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+};
+#endif
 
 static int enable_show(struct seq_file *m, void *ptr)
 {
@@ -615,6 +683,7 @@ static ssize_t enable_write(struct file *file, const char __user *buf,
 	return count;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
 static const struct file_operations enable_fops = {
 	.open		= enable_open,
 	.read		= seq_read,
@@ -622,6 +691,15 @@ static const struct file_operations enable_fops = {
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
+#else
+static const struct proc_ops enable_fops = {
+	.proc_open	= enable_open,
+	.proc_read	= seq_read,
+	.proc_write	= enable_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+};
+#endif
 
 static int sampling_period_show(struct seq_file *m, void *ptr)
 {
@@ -655,6 +733,7 @@ static ssize_t sampling_period_write(struct file *file, const char __user *buf,
 	return count;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 6, 0)
 static const struct file_operations sampling_period_fops = {
 	.open		= sampling_period_open,
 	.read		= seq_read,
@@ -662,6 +741,15 @@ static const struct file_operations sampling_period_fops = {
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
+#else
+static const struct proc_ops sampling_period_fops = {
+	.proc_open	= sampling_period_open,
+	.proc_read	= seq_read,
+	.proc_write	= sampling_period_write,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+};
+#endif
 
 static int __init trace_irqoff_init(void)
 {
