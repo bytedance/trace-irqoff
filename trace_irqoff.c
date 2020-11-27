@@ -202,11 +202,9 @@ static void stack_trace_skip_hardirq_init(void)
 
 	ret = register_kprobe(&kp);
 	if (ret < 0) {
-		printk(KERN_INFO "register_kprobe failed, error:%d\n", ret);
 		return;
 	}
 
-	printk(KERN_INFO "kallsyms_lookup_name addr: %p\n", kp.addr);
 	kallsyms_lookup_name_fun = (void*)kp.addr;
 	unregister_kprobe(&kp);
 
