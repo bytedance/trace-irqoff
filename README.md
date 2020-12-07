@@ -113,7 +113,7 @@ static void disable_hardirq(unsigned long latency)
 {
     local_irq_disable();
     mdelay(latency);
-    local_irq_enanle();
+    local_irq_enable();
 }
 ```
 
@@ -151,7 +151,7 @@ static void disable_softirq(unsigned long latency)
 {
     local_bh_disable();
     mdelay(latency);
-    local_bh_enanle();
+    local_bh_enable();
 }
 ```
 
