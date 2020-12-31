@@ -20,7 +20,7 @@
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
 #include <linux/stacktrace.h>
-#include <linux/timer.h>
+#include <linux/interrupt.h>
 #include <linux/uaccess.h>
 #include <linux/kprobes.h>
 #include <linux/version.h>
@@ -112,7 +112,7 @@ struct stack_trace_metadata {
 };
 
 struct per_cpu_stack_trace {
-	struct timer_list timer;
+	struct tasklet_struct tasklet;
 	struct hrtimer hrtimer;
 	struct stack_trace_metadata hardirq_trace;
 	struct stack_trace_metadata softirq_trace;
@@ -307,6 +307,7 @@ static bool trace_irqoff_record(u64 delta, bool hardirq, bool skip)
 static enum hrtimer_restart trace_irqoff_hrtimer_handler(struct hrtimer *hrtimer)
 {
 	u64 now = local_clock(), delta;
+	struct tasklet_struct *tasklet;
 
 	delta = now - __this_cpu_read(cpu_stack_trace->hardirq_trace.last_timestamp);
 	__this_cpu_write(cpu_stack_trace->hardirq_trace.last_timestamp, now);
@@ -326,36 +327,12 @@ static enum hrtimer_restart trace_irqoff_hrtimer_handler(struct hrtimer *hrtimer
 		}
 	}
 
+	tasklet = per_cpu_ptr(&cpu_stack_trace->tasklet, smp_processor_id());
+	tasklet_schedule(tasklet);
+
 	hrtimer_forward_now(hrtimer, ns_to_ktime(sampling_period));
 
 	return HRTIMER_RESTART;
-}
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
-static void trace_irqoff_timer_handler(unsigned long data)
-#else
-static void trace_irqoff_timer_handler(struct timer_list *timer)
-#endif
-{
-	u64 now = local_clock(), delta;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
-	struct timer_list *timer = (struct timer_list *)data;
-#endif
-
-	delta = now - __this_cpu_read(cpu_stack_trace->softirq_trace.last_timestamp);
-	__this_cpu_write(cpu_stack_trace->softirq_trace.last_timestamp, now);
-
-	__this_cpu_write(cpu_stack_trace->softirq_delayed, false);
-
-	trace_irqoff_record(delta, false, false);
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
-	mod_timer_pinned(timer,
-			 jiffies + msecs_to_jiffies(sampling_period / 1000000UL));
-#else
-	mod_timer(timer,
-		  jiffies + msecs_to_jiffies(sampling_period / 1000000UL));
-#endif
 }
 
 static void smp_clear_stack_trace(void *info)
@@ -379,16 +356,12 @@ static void smp_timers_start(void *info)
 	u64 now = local_clock();
 	struct per_cpu_stack_trace *stack_trace = info;
 	struct hrtimer *hrtimer = &stack_trace->hrtimer;
-	struct timer_list *timer = &stack_trace->timer;
 
 	stack_trace->hardirq_trace.last_timestamp = now;
 	stack_trace->softirq_trace.last_timestamp = now;
 
 	hrtimer_start_range_ns(hrtimer, ns_to_ktime(sampling_period),
 			       0, HRTIMER_MODE_REL_PINNED);
-
-	timer->expires = jiffies + msecs_to_jiffies(sampling_period / 1000000UL);
-	add_timer_on(timer, smp_processor_id());
 }
 
 #define NUMBER_CHARACTER	40
@@ -415,7 +388,7 @@ static bool histogram_show(struct seq_file *m, const char *header,
 	/* print header */
 	if (header)
 		seq_printf(m, "%s\n", header);
-	seq_printf(m, "%*c%s%*c : %-9s %s\n", 9, ' ', "msecs", 10, ' ', "count",
+	seq_printf(m, "%*c%s%*c : %-9s %s\n", 9, ' ', "usecs", 10, ' ', "count",
 		   "distribution");
 
 	for (i = 0; i < zero_index; i++) {
@@ -458,7 +431,7 @@ static void distribute_show_one(struct seq_file *m, void *v, bool hardirq)
 
 	histogram_show(m, hardirq ? "hardirq-off:" : "softirq-off:",
 		       latency_count, MAX_LATENCY_RECORD,
-		       (sampling_period << 1) / (1000 * 1000UL));
+		       (sampling_period << 1) / 1000UL);
 }
 
 static int distribute_show(struct seq_file *m, void *v)
@@ -498,10 +471,10 @@ static ssize_t trace_latency_write(struct file *file, const char __user *buf,
 						 per_cpu_ptr(cpu_stack_trace, cpu),
 						 true);
 		return count;
-	} else if (latency < (sampling_period << 1) / (1000 * 1000UL))
+	} else if (latency < (sampling_period << 1) / 1000UL)
 		return -EINVAL;
 
-	trace_irqoff_latency = latency * 1000 * 1000UL;
+	trace_irqoff_latency = latency * 1000UL;
 
 	return count;
 }
@@ -535,8 +508,8 @@ static void trace_latency_show_one(struct seq_file *m, void *v, bool hardirq)
 			seq_printf(m, "%*cCOMMAND: %s PID: %d LATENCY: %lu%s\n",
 				   5, ' ', stack_trace->comms[i],
 				   stack_trace->pids[i],
-				   stack_trace->latency[i].nsecs / (1000 * 1000UL),
-				   stack_trace->latency[i].more ? "+ms" : "ms");
+				   stack_trace->latency[i].nsecs / 1000UL,
+				   stack_trace->latency[i].more ? "+us" : "us");
 			seq_print_stack_trace(m, trace);
 			seq_putc(m, '\n');
 
@@ -547,8 +520,8 @@ static void trace_latency_show_one(struct seq_file *m, void *v, bool hardirq)
 
 static int trace_latency_show(struct seq_file *m, void *v)
 {
-	seq_printf(m, "trace_irqoff_latency: %llums\n\n",
-		   trace_irqoff_latency / (1000 * 1000UL));
+	seq_printf(m, "trace_irqoff_latency: %lluus\n\n",
+		   trace_irqoff_latency / 1000UL);
 
 	seq_puts(m, " hardirq:\n");
 	trace_latency_show_one(m, v, true);
@@ -597,30 +570,30 @@ static int enable_open(struct inode *inode, struct file *file)
 	return single_open(file, enable_show, inode->i_private);
 }
 
+void trace_irqoff_tasklet_handler(unsigned long unused)
+{
+	u64 now = local_clock(), delta;
+
+	delta = now - __this_cpu_read(cpu_stack_trace->softirq_trace.last_timestamp);
+	__this_cpu_write(cpu_stack_trace->softirq_trace.last_timestamp, now);
+	__this_cpu_write(cpu_stack_trace->softirq_delayed, false);
+	trace_irqoff_record(delta, false, false);
+}
+
 static void trace_irqoff_start_timers(void)
 {
 	int cpu;
 
 	for_each_online_cpu(cpu) {
 		struct hrtimer *hrtimer;
-		struct timer_list *timer;
+		struct tasklet_struct *tasklet;
 
 		hrtimer = per_cpu_ptr(&cpu_stack_trace->hrtimer, cpu);
 		hrtimer_init(hrtimer, CLOCK_MONOTONIC, HRTIMER_MODE_PINNED);
 		hrtimer->function = trace_irqoff_hrtimer_handler;
 
-		timer = per_cpu_ptr(&cpu_stack_trace->timer, cpu);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 7, 0)
-		__setup_timer(timer, trace_irqoff_timer_handler,
-			      (unsigned long)timer, TIMER_IRQSAFE);
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(4, 15, 0)
-		timer->flags = TIMER_PINNED | TIMER_IRQSAFE;
-		setup_timer(timer, trace_irqoff_timer_handler,
-			    (unsigned long)timer);
-#else
-		timer_setup(timer, trace_irqoff_timer_handler,
-			    TIMER_PINNED | TIMER_IRQSAFE);
-#endif
+		tasklet = per_cpu_ptr(&cpu_stack_trace->tasklet, cpu);
+		tasklet_init(tasklet, trace_irqoff_tasklet_handler, 0);
 
 		smp_call_function_single(cpu, smp_timers_start,
 					 per_cpu_ptr(cpu_stack_trace, cpu),
@@ -634,13 +607,13 @@ static void trace_irqoff_cancel_timers(void)
 
 	for_each_online_cpu(cpu) {
 		struct hrtimer *hrtimer;
-		struct timer_list *timer;
+		struct tasklet_struct *tasklet;
 
 		hrtimer = per_cpu_ptr(&cpu_stack_trace->hrtimer, cpu);
 		hrtimer_cancel(hrtimer);
 
-		timer = per_cpu_ptr(&cpu_stack_trace->timer, cpu);
-		del_timer_sync(timer);
+		tasklet = per_cpu_ptr(&cpu_stack_trace->tasklet, cpu);
+		tasklet_kill(tasklet);
 	}
 }
 
@@ -701,7 +674,7 @@ static const struct proc_ops enable_fops = {
 
 static int sampling_period_show(struct seq_file *m, void *ptr)
 {
-	seq_printf(m, "%llums\n", sampling_period / (1000 * 1000UL));
+	seq_printf(m, "%lluus\n", sampling_period / 1000UL);
 
 	return 0;
 }
@@ -722,7 +695,7 @@ static ssize_t sampling_period_write(struct file *file, const char __user *buf,
 	if (kstrtoul_from_user(buf, count, 0, &period))
 		return -EINVAL;
 
-	period *= 1000 * 1000UL;
+	period *= 1000UL;
 	if (period > (trace_irqoff_latency >> 1))
 		trace_irqoff_latency = period << 1;
 
@@ -777,6 +750,7 @@ static int __init trace_irqoff_init(void)
 			 &sampling_period_fops))
 		goto remove_proc;
 
+	pr_info("trace_irqoff init successfuly!\n");
 	return 0;
 
 remove_proc:
@@ -793,6 +767,7 @@ static void __exit trace_irqoff_exit(void)
 		trace_irqoff_cancel_timers();
 	remove_proc_subtree("trace_irqoff", NULL);
 	free_percpu(cpu_stack_trace);
+	pr_info("trace_irqoff exit successfuly!\n");
 }
 
 module_init(trace_irqoff_init);
