@@ -93,6 +93,7 @@ struct irqoff_trace {
 
 struct stack_trace_metadata {
 	u64 last_timestamp;
+	u64 begin_timestamp[MAX_STACE_TRACE_ENTRIES];
 	unsigned long nr_irqoff_trace;
 	struct irqoff_trace trace[MAX_STACE_TRACE_ENTRIES];
 	unsigned long nr_entries;
@@ -121,6 +122,16 @@ struct per_cpu_stack_trace {
 };
 
 static struct per_cpu_stack_trace __percpu *cpu_stack_trace;
+static size_t time_to_sec(u64 ts, char *buf)
+{
+	unsigned long rem_nsec;
+	rem_nsec = do_div(ts, 1000000000);
+	if (!buf)
+		return snprintf(NULL, 0, "start_time:%7lu.%06lus ", (unsigned long)ts);
+	return sprintf(buf, "start_time:%7lu.%06lus",
+			(unsigned long)ts, rem_nsec / 1000);
+
+}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 1, 0)
 static void (*save_stack_trace_skip_hardirq)(struct pt_regs *regs,
@@ -253,6 +264,8 @@ static bool save_trace(struct pt_regs *regs, bool hardirq, u64 latency)
 		TASK_COMM_LEN);
 	stack_trace->pids[nr_irqoff_trace] = current->pid;
 	stack_trace->latency[nr_irqoff_trace].nsecs = latency;
+	stack_trace->begin_timestamp[nr_irqoff_trace] = \
+		stack_trace->last_timestamp - latency;
 	stack_trace->latency[nr_irqoff_trace].more = !hardirq && regs;
 
 	trace = stack_trace->trace + nr_irqoff_trace;
@@ -511,6 +524,7 @@ static ssize_t trace_latency_write(struct file *file, const char __user *buf,
 static void trace_latency_show_one(struct seq_file *m, void *v, bool hardirq)
 {
 	int cpu;
+	char start_time[128]={0};
 
 	for_each_online_cpu(cpu) {
 		int i;
@@ -533,12 +547,14 @@ static void trace_latency_show_one(struct seq_file *m, void *v, bool hardirq)
 
 		for (i = 0; i < nr_irqoff_trace; i++) {
 			struct irqoff_trace *trace = stack_trace->trace + i;
+			memset(start_time,0,sizeof(start_time));
+		    time_to_sec(stack_trace->begin_timestamp[i],start_time);
 
-			seq_printf(m, "%*cCOMMAND: %s PID: %d LATENCY: %lu%s\n",
-				   5, ' ', stack_trace->comms[i],
+			seq_printf(m, "%*cCOMMAND: %s PID: %d LATENCY: %lu%s %s\n",
+				   6, ' ', stack_trace->comms[i],
 				   stack_trace->pids[i],
 				   stack_trace->latency[i].nsecs / (1000 * 1000UL),
-				   stack_trace->latency[i].more ? "+ms" : "ms");
+				   stack_trace->latency[i].more ? "+ms" : "ms",start_time);
 			seq_print_stack_trace(m, trace);
 			seq_putc(m, '\n');
 
@@ -562,6 +578,7 @@ static int trace_latency_show(struct seq_file *m, void *v)
 
 	return 0;
 }
+
 
 static int trace_latency_open(struct inode *inode, struct file *file)
 {
